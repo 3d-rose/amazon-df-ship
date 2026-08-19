@@ -1,0 +1,142 @@
+name: Build (Windows x64)
+
+# Classic .NET Framework 4.7 WinForms project: needs full MSBuild on a Windows
+# runner. `dotnet build` cannot build it — the csproj is legacy format with
+# WinForms designer files and a packages.config restore style.
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  SOLUTION: AmazonDFShip.sln
+  CONFIGURATION: Release
+  # OutputPath comes from the csproj Release|AnyCPU property group and is not
+  # affected by the PlatformTarget override, so the path stays bin\Release.
+  OUTPUT_DIR: AmazonDFShip\bin\Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+
+      - name: Set up NuGet
+        uses: NuGet/setup-nuget@v2
+
+      # App.config is gitignored, but MSBuild still needs it to exist — the
+      # <None Include="App.config" /> item drives the copy to
+      # AmazonDFShip.exe.config, and a missing file fails the build with MSB3030.
+      # We stage the blank template so CI compiles without any credentials.
+      # Fill the values in on the machine that actually runs the exe.
+      - name: Stage a blank App.config
+        shell: pwsh
+        run: |
+          $target = 'AmazonDFShip\App.config'
+          if (Test-Path $target) {
+            Write-Host "App.config already present — leaving it alone."
+          } else {
+            Copy-Item 'AmazonDFShip\App.config.template' $target
+            Write-Host "Staged blank App.config from template."
+          }
+
+      - name: Restore NuGet packages
+        # packages.config style: `msbuild -t:restore` does NOT work here, and the
+        # csproj HintPaths point at ..\packages\<id>.<version>\lib\...
+        shell: pwsh
+        run: nuget restore $env:SOLUTION
+
+      # PlatformTarget/Prefer32Bit are overridden rather than adding an x64
+      # solution configuration: the sln only declares "Any CPU", and Debug-Headless
+      # sets Prefer32Bit=true, which would otherwise yield a 32-bit process on x64.
+      # SignManifests/GenerateManifests are off because the csproj references a
+      # ClickOnce cert thumbprint that does not exist on a CI runner.
+      - name: Build
+        shell: pwsh
+        run: >
+          msbuild $env:SOLUTION
+          /p:Configuration=$env:CONFIGURATION
+          '/p:Platform=Any CPU'
+          /p:PlatformTarget=x64
+          /p:Prefer32Bit=false
+          /p:SignManifests=false
+          /p:GenerateManifests=false
+          /verbosity:minimal
+          /nologo
+          /maxcpucount
+
+      # Guards against a "green" build that silently produced nothing, and asserts
+      # the binary really is x64 rather than AnyCPU/32-bit-preferred.
+      - name: Verify output
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:OUTPUT_DIR 'AmazonDFShip.exe'
+          if (-not (Test-Path $exe)) {
+            Write-Error "Build reported success but $exe is missing."
+            exit 1
+          }
+
+          Get-Item $exe | Select-Object FullName, Length, LastWriteTime | Format-List
+
+          $kind = [System.Reflection.AssemblyName]::GetAssemblyName($exe).ProcessorArchitecture
+          Write-Host "Processor architecture: $kind"
+          if ($kind -ne 'Amd64') {
+            Write-Error "Expected an Amd64 assembly but got '$kind'."
+            exit 1
+          }
+
+          Get-ChildItem $env:OUTPUT_DIR -Filter *.dll | Select-Object Name | Format-Table
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path "$env:OUTPUT_DIR\*" -DestinationPath dist\AmazonDFShip-win-x64.zip -Force
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AmazonDFShip-win-x64
+          path: dist/AmazonDFShip-win-x64.zip
+          retention-days: 90
+          if-no-files-found: error
+
+  release:
+    # Only for pushed tags like v1.0.0.8
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AmazonDFShip-win-x64
+          path: dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/AmazonDFShip-win-x64.zip
+          generate_release_notes: true
+          body: |
+            Windows x64 build of AmazonDFShip.
+
+            **Before running:** the archive ships a blank `AmazonDFShip.exe.config`.
+            Fill in the `<appSettings>` values (DB credentials, Amazon client id and
+            refresh tokens, AWS keys) before starting the app. Remember that `&`
+            must be written as `&amp;` inside that XML.
+
+            Unattended run: `AmazonDFShip.exe --auto`
+            Exit codes: 0 ok, 2 already running, 3 DB login, 4 tokens, 5 config, 6 some labels failed.
