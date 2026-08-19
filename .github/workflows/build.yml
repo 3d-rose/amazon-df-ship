@@ -112,10 +112,33 @@ jobs:
 
           Get-Item $exe | Select-Object FullName, Length, LastWriteTime | Format-List
 
-          $kind = [System.Reflection.AssemblyName]::GetAssemblyName($exe).ProcessorArchitecture
-          Write-Host "Processor architecture: $kind"
-          if ($kind -ne 'Amd64') {
-            Write-Error "Expected an Amd64 assembly but got '$kind'."
+          # Read the COFF machine type straight out of the PE header.
+          # AssemblyName.ProcessorArchitecture is obsolete and always returns None
+          # on .NET Core, which is what pwsh runs on, so it cannot be used here.
+          $bytes    = [System.IO.File]::ReadAllBytes($exe)
+          $peOffset = [System.BitConverter]::ToInt32($bytes, 0x3C)
+
+          if ($bytes[$peOffset] -ne 0x50 -or $bytes[$peOffset + 1] -ne 0x45) {
+            Write-Error "No PE signature at offset $peOffset - not a valid PE image."
+            exit 1
+          }
+
+          $machine = [System.BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          $magic   = [System.BitConverter]::ToUInt16($bytes, $peOffset + 24)
+
+          $machineName = switch ($machine) {
+            0x8664  { 'x64 (AMD64)' }
+            0x014C  { 'x86 / AnyCPU (I386)' }
+            0xAA64  { 'ARM64' }
+            default { ('unknown 0x{0:X4}' -f $machine) }
+          }
+          $magicName = if ($magic -eq 0x20B) { 'PE32+' } elseif ($magic -eq 0x10B) { 'PE32' } else { 'unknown' }
+
+          Write-Host ('Machine: 0x{0:X4} - {1}' -f $machine, $machineName)
+          Write-Host "Optional header: $magicName"
+
+          if ($machine -ne 0x8664) {
+            Write-Error "Expected an x64 image (0x8664) but got $machineName."
             exit 1
           }
 
