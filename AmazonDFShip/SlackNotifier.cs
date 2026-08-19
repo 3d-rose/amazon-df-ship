@@ -33,6 +33,28 @@ namespace AmazonDFShip
             Task.Run(() => SendInternal(text));
         }
 
+        /// <summary>
+        /// Posts synchronously, with a hard timeout so a slow or unreachable webhook
+        /// can never hold up a run.  Used for the closing message of a headless run,
+        /// where the process exits immediately afterwards and a fire-and-forget task
+        /// would be torn down before the request was sent.
+        /// </summary>
+        public static void PostAndWait(string text, int timeoutMs = 10000)
+        {
+            if (string.IsNullOrWhiteSpace(WebhookUrl))
+                return;
+
+            try
+            {
+                if (!Task.Run(() => SendInternal(text)).Wait(timeoutMs))
+                    Logger.Warn("Slack notification timed out after {0} ms.", timeoutMs);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "Slack notification failed (non-fatal).");
+            }
+        }
+
         private static void SendInternal(string text)
         {
             try

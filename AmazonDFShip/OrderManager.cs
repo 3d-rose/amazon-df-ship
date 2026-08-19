@@ -88,10 +88,14 @@ namespace AmazonDFShip
 
         private bool SaveShippingLabel()
         {
-            string primary = $"{OrderManager.Instance.LabelPath}\\{Invoice}.zpl";
-            string temp = $"temp\\{Invoice}.zpl";
             try
             {
+                // Inside the try: a bad LabelPath or an undeletable temp folder must
+                // return false like any other save failure, not escape the method.
+                string primary = Path.Combine(OrderManager.Instance.LabelPath, $"{Invoice}.zpl");
+                string temp = Paths.ResolveForWrite(
+                    Path.Combine(Paths.TempDirName, $"{Invoice}.zpl"));
+
                 OrderManager.Instance.AddToLogTextBox($"Saving ZPL for invoice: {Invoice}");
                 File.WriteAllText(primary, ShippingLabel.ZPL);
                 File.WriteAllText(temp, ShippingLabel.ZPL);
@@ -175,6 +179,11 @@ namespace AmazonDFShip
         public List<Order> Orders => m_lstOrders;
         public List<string> Batches => m_lstBatches;
 
+        // Result counters — read by frmMain to pick the process exit code.
+        public int SuccessCount => m_lstSuccess?.Count ?? 0;
+        public int FailureCount => m_lstFailure?.Count ?? 0;
+        public int CancelledCount => m_lstCancelled?.Count ?? 0;
+
         // -----------------------------------------------------------------------
         // Construction
         // -----------------------------------------------------------------------
@@ -189,8 +198,21 @@ namespace AmazonDFShip
         {
             m_Form = form;
 
-            m_AccessInfo3DROX = AccessInfo.Create(eCenter.C_3DROX_ADWL);
-            m_AccessInfo3DRPB = AccessInfo.Create(eCenter.C_3DRPB_AOTW);
+            // AccessInfo's constructor reads App.config and throws
+            // ConfigurationErrorsException on a missing key. That exception used to
+            // escape all the way out, producing a modal crash dialog that hangs a
+            // headless run indefinitely.
+            try
+            {
+                m_AccessInfo3DROX = AccessInfo.Create(eCenter.C_3DROX_ADWL);
+                m_AccessInfo3DRPB = AccessInfo.Create(eCenter.C_3DRPB_AOTW);
+            }
+            catch (Exception ex)
+            {
+                Logger.Fatal(ex, "Failed to build Amazon access credentials.");
+                Fail("Could not build Amazon access credentials: " + ex.Message);
+                return false;
+            }
 
             if (m_AccessInfo3DROX == null || m_AccessInfo3DRPB == null)
             {
@@ -198,21 +220,46 @@ namespace AmazonDFShip
                     ? "3DROX and 3DRPB accounts"
                     : m_AccessInfo3DROX == null ? "3DROX account" : "3DRPB account";
 
-                MessageBox.Show(
-                    $"Could not obtain a valid access token for the {which}.{Environment.NewLine}" +
-                    "Please inform IT of this error.",
-                    "Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-
-                m_bTerminating = true;
+                Fail($"Could not obtain a valid access token for the {which}.{Environment.NewLine}" +
+                     "Please inform IT of this error.");
                 return false;
             }
 
             m_strLabelPath = Database.Instance.GetLabelPath();
 
+            // An empty label path used to yield "\1234.zpl", i.e. the root of the
+            // current drive, so every save failed with an access-denied error.
+            if (!Paths.ValidateLabelPath(m_strLabelPath, out string pathError))
+            {
+                Logger.Fatal(pathError);
+                Fail(pathError);
+                return false;
+            }
+
+            Logger.Info("Shipping labels will be written to: {0}", m_strLabelPath);
+
             m_TokenTimer = new System.Threading.Timer(
                 OnTokenTimerElapsed, null, TokenCheckIntervalMs, TokenCheckIntervalMs);
 
             return true;
+        }
+
+        /// <summary>
+        /// Reports a fatal startup problem. Shows a dialog only when a user is present;
+        /// a MessageBox on the --auto path blocks the process until someone kills it.
+        /// </summary>
+        private void Fail(string message)
+        {
+            m_bTerminating = true;
+
+            if (Program.IsHeadless)
+            {
+                Program.Report(message, isError: true);
+                return;
+            }
+
+            MessageBox.Show(message, "Fatal Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         public void TerminateStart()
@@ -303,13 +350,17 @@ namespace AmazonDFShip
 
         private List<int> LoadInvoiceExclusions()
         {
-            const string ExclusionFile = "invoice_exclusions.txt";
+            string exclusionFile = Paths.Resolve("invoice_exclusions.txt");
             var list = new List<int>();
 
-            if (!File.Exists(ExclusionFile)) return list;
+            if (!File.Exists(exclusionFile))
+            {
+                Logger.Info("No exclusion file at {0} — processing all orders.", exclusionFile);
+                return list;
+            }
 
-            string[] lines = File.ReadAllLines(ExclusionFile);
-            Logger.Info("Read {0} line(s) from {1}.", lines.Length, ExclusionFile);
+            string[] lines = File.ReadAllLines(exclusionFile);
+            Logger.Info("Read {0} line(s) from {1}.", lines.Length, exclusionFile);
 
             foreach (string line in lines)
             {
@@ -335,18 +386,31 @@ namespace AmazonDFShip
         /// <summary>Starts label generation for all loaded orders on a background thread.</summary>
         public void ProcessAllOrders()
         {
-            if (!EnsureOrdersReady()) return;
+            if (!EnsureOrdersReady())
+            {
+                // Still signal completion: this is what re-enables the GUI buttons and,
+                // in headless mode, what ends the process. Returning silently left the
+                // form stuck and an --auto run hanging with nothing to do.
+                NotifyFinishedWithoutRun();
+                return;
+            }
+
             Task.Run(() => RunProcessingLoop(m_lstOrders, "all batches"));
         }
 
         /// <summary>Starts label generation for orders belonging to the given batches.</summary>
         public void ProcessOrdersForBatches(List<string> batches)
         {
-            if (!EnsureOrdersReady()) return;
+            if (!EnsureOrdersReady())
+            {
+                NotifyFinishedWithoutRun();
+                return;
+            }
 
             if (batches == null || batches.Count == 0)
             {
                 Logger.Error("ProcessOrdersForBatches called with no batches specified.");
+                NotifyFinishedWithoutRun();
                 return;
             }
 
@@ -358,10 +422,35 @@ namespace AmazonDFShip
             {
                 Logger.Warn("No orders matched the selected batch filter.");
                 AddToLogTextBox("No orders to process based on batches selected.");
+                NotifyFinishedWithoutRun();
                 return;
             }
 
             Task.Run(() => RunProcessingLoop(subset, $"{batches.Count} batch(es)"));
+        }
+
+        /// <summary>
+        /// Fires the completion callback for the cases where no processing loop ever
+        /// starts, so the caller is never left waiting on a run that will not happen.
+        /// </summary>
+        private void NotifyFinishedWithoutRun()
+        {
+            m_bGenerating = false;
+
+            try
+            {
+                m_Form.OnShippingLabelsFinished();
+            }
+            catch (Exception ex)
+            {
+                Logger.Error(ex, "OnShippingLabelsFinished threw.");
+
+                if (Program.IsHeadless)
+                {
+                    Environment.ExitCode = Program.ExitUnhandled;
+                    Program.ShutdownHeadless();
+                }
+            }
         }
 
         // -----------------------------------------------------------------------
@@ -376,67 +465,127 @@ namespace AmazonDFShip
             m_bGenerating = true;
 
             DateTime startTime = DateTime.Now;
-            SlackNotifier.Post($"DF process started at `{startTime:HH:mm:ss}`");
 
-            AddToLogTextBox($"Starting shipping label generation for {context}.");
-            Logger.Info("Starting shipping label generation for {0}.", context);
-
-            int done = 0;
-
-            foreach (Order order in orders)
+            // The whole loop is wrapped so OnShippingLabelsFinished always runs.
+            // If anything threw here before, the finish callback never fired and a
+            // headless run sat in the message loop forever — no labels, no exit.
+            try
             {
-                if (!order.InitiateShippingLabel())
+                SlackNotifier.Post($"DF process started at `{startTime:HH:mm:ss}`");
+
+                AddToLogTextBox($"Starting shipping label generation for {context}.");
+                Logger.Info("Starting shipping label generation for {0}.", context);
+
+                int done = 0;
+
+                foreach (Order order in orders)
                 {
-                    m_lstFailure.Add(order);
+                    if (m_bTerminating)
+                    {
+                        Logger.Warn("Termination requested - stopping after {0} order(s).", done);
+                        break;
+                    }
+
+                    try
+                    {
+                        ProcessSingleOrder(order);
+                    }
+                    catch (Exception ex)
+                    {
+                        // One bad order must not abort the whole batch.
+                        Logger.Error(ex, "Unhandled exception processing invoice {0}.", order.Invoice);
+                        AddToLogTextBox(
+                            $"Error processing invoice {order.Invoice}: {ex.Message} ❌");
+
+                        if (!m_lstFailure.Contains(order))
+                            m_lstFailure.Add(order);
+                    }
+
+                    ++done;
+                    UpdateProcessingLabel($"Generated label: {done}/{orders.Count}");
                     UpdateSuccessFailure();
-                    continue;
                 }
 
-                Thread.Sleep(1000);
+                TimeSpan elapsed = DateTime.Now - startTime;
 
-                if (order.ProcessShippingLabel())
-                {
-                    m_lstSuccess.Add(order);
-                    AddToLogTextBox(
-                        $"Shipping label generated for invoice {order.Invoice} \u2714");
-                }
-                else if (order.IsCancelled)
-                {
-                    // Confirmed cancelled — stamp the DB, don't count as a failure
-                    Database.Instance.MarkOrderCancelled(order.Invoice);
-                    m_lstCancelled.Add(order);
-                    AddToLogTextBox(
-                        $"Invoice {order.Invoice} is cancelled — marked in database \u26D4");
-                    Logger.Info("Invoice {0} stamped as cancelled.", order.Invoice);
-                }
+                UpdateProcessingLabel($"Done. Generated {m_lstSuccess.Count} shipping label(s).");
+                AddToLogTextBox("Requested operation has been completed.");
+                AddToLogTextBox($"Shipping labels generated: {m_lstSuccess.Count} ✔");
+                AddToLogTextBox($"Cancelled orders skipped:  {m_lstCancelled.Count} ⛔");
+                AddToLogTextBox($"Shipping labels failed:    {m_lstFailure.Count} ❌");
+
+                Logger.Info(
+                    "Label generation finished. Success: {0}  Cancelled: {1}  Failure: {2}",
+                    m_lstSuccess.Count, m_lstCancelled.Count, m_lstFailure.Count);
+
+                // A headless run exits the process moments from now, so wait for the
+                // closing webhook instead of firing it into a task that gets killed.
+                if (Program.IsHeadless)
+                    SlackNotifier.PostAndWait(BuildFinishMessage(elapsed));
                 else
-                {
-                    m_lstFailure.Add(order);
-                    AddToLogTextBox(
-                        $"Failed to generate shipping label for invoice {order.Invoice} \u274C");
-                }
+                    SlackNotifier.Post(BuildFinishMessage(elapsed));
+            }
+            catch (Exception ex)
+            {
+                Logger.Fatal(ex, "Label generation loop aborted.");
+                Program.Report("Label generation aborted: " + ex.Message, isError: true);
+            }
+            finally
+            {
+                // This block is the only thing that ends a headless run. Before, an
+                // exception anywhere above skipped it and the process hung forever.
+                m_bGenerating = false;
 
-                ++done;
-                UpdateProcessingLabel($"Generated label: {done}/{orders.Count}");
+                try
+                {
+                    m_Form.OnShippingLabelsFinished();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex, "OnShippingLabelsFinished threw.");
+
+                    if (Program.IsHeadless)
+                    {
+                        Environment.ExitCode = Program.ExitUnhandled;
+                        Program.ShutdownHeadless();
+                    }
+                }
+            }
+        }
+
+        /// <summary>Runs the full label pipeline for a single order.</summary>
+        private void ProcessSingleOrder(Order order)
+        {
+            if (!order.InitiateShippingLabel())
+            {
+                m_lstFailure.Add(order);
                 UpdateSuccessFailure();
+                return;
             }
 
-            TimeSpan elapsed = DateTime.Now - startTime;
+            Thread.Sleep(1000);
 
-            UpdateProcessingLabel($"Done. Generated {m_lstSuccess.Count} shipping label(s).");
-            AddToLogTextBox("Requested operation has been completed.");
-            AddToLogTextBox($"Shipping labels generated: {m_lstSuccess.Count} \u2714");
-            AddToLogTextBox($"Cancelled orders skipped:  {m_lstCancelled.Count} \u26D4");
-            AddToLogTextBox($"Shipping labels failed:    {m_lstFailure.Count} \u274C");
-
-            Logger.Info(
-                "Label generation finished. Success: {0}  Cancelled: {1}  Failure: {2}",
-                m_lstSuccess.Count, m_lstCancelled.Count, m_lstFailure.Count);
-
-            SlackNotifier.Post(BuildFinishMessage(elapsed));
-
-            m_bGenerating = false;
-            m_Form.OnShippingLabelsFinished();
+            if (order.ProcessShippingLabel())
+            {
+                m_lstSuccess.Add(order);
+                AddToLogTextBox(
+                    $"Shipping label generated for invoice {order.Invoice} ✔");
+            }
+            else if (order.IsCancelled)
+            {
+                // Confirmed cancelled - stamp the DB, don't count as a failure
+                Database.Instance.MarkOrderCancelled(order.Invoice);
+                m_lstCancelled.Add(order);
+                AddToLogTextBox(
+                    $"Invoice {order.Invoice} is cancelled - marked in database ⛔");
+                Logger.Info("Invoice {0} stamped as cancelled.", order.Invoice);
+            }
+            else
+            {
+                m_lstFailure.Add(order);
+                AddToLogTextBox(
+                    $"Failed to generate shipping label for invoice {order.Invoice} ❌");
+            }
         }
 
         /// <summary>

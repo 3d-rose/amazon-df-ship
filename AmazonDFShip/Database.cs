@@ -32,9 +32,9 @@ namespace AmazonDFShip
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
 
         private string m_strConnectionString;
-        private const string ConnectionTemplate =
-            "Data Source=fe80::68d9:775b:28fb:8550;Initial Catalog=3DRose;" +
-            "User ID={USERNAME};Password={PASSWORD}";
+
+        private const string DataSource = "fe80::68d9:775b:28fb:8550";
+        private const string InitialCatalog = "3DRose";
 
         // -----------------------------------------------------------------------
         // Construction
@@ -48,9 +48,46 @@ namespace AmazonDFShip
 
         public bool Login(string username, string password)
         {
-            m_strConnectionString = ConnectionTemplate
-                .Replace("{USERNAME}", username)
-                .Replace("{PASSWORD}", password);
+            if (string.IsNullOrEmpty(username))
+            {
+                Logger.Fatal("Database login called with an empty username. " +
+                             "In --auto mode this means App.config key 'DB.Username' " +
+                             "is missing or blank.");
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(password))
+            {
+                Logger.Fatal("Database login called with an empty password. " +
+                             "In --auto mode this means App.config key 'DB.Password' " +
+                             "is missing or blank.");
+                return false;
+            }
+
+            // Build the connection string through SqlConnectionStringBuilder rather than
+            // by string substitution.  The builder quotes and escapes values, so passwords
+            // containing  @  ;  =  '  "  or leading/trailing whitespace survive intact.
+            // Naive concatenation silently corrupted such passwords, which is why the
+            // interactive login could succeed while --auto failed with the same account.
+            try
+            {
+                var builder = new SqlConnectionStringBuilder
+                {
+                    DataSource = DataSource,
+                    InitialCatalog = InitialCatalog,
+                    UserID = username,
+                    Password = password,
+                    IntegratedSecurity = false
+                };
+
+                m_strConnectionString = builder.ConnectionString;
+            }
+            catch (ArgumentException ex)
+            {
+                Logger.Fatal(ex, "Could not build a valid SQL connection string for user '{0}'.",
+                    username);
+                return false;
+            }
 
             using (var connection = new SqlConnection(m_strConnectionString))
             {
@@ -61,11 +98,22 @@ namespace AmazonDFShip
                 }
                 catch (SqlException ex)
                 {
-                    Logger.Error(ex, "SQL Exception during login.");
+                    Logger.Error(ex, "SQL Exception during login for user '{0}'.", username);
+                    return false;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Error(ex, "Unexpected exception during login for user '{0}'.", username);
                     return false;
                 }
             }
         }
+
+        /// <summary>
+        /// True once <see cref="Login"/> has produced a usable connection string.
+        /// Callers use this to fail fast instead of issuing queries against null.
+        /// </summary>
+        public bool IsConnected => !string.IsNullOrEmpty(m_strConnectionString);
 
         // -----------------------------------------------------------------------
         // Secrets
@@ -73,6 +121,12 @@ namespace AmazonDFShip
 
         public bool GetClientSecretForSite(int siteId, ref string secret)
         {
+            if (!IsConnected)
+            {
+                Logger.Error("GetClientSecretForSite({0}) called before a successful login.", siteId);
+                return false;
+            }
+
             const string Sql =
                 "SELECT s.token FROM tbSites s WHERE s.SiteNbr = @SITEID";
 
@@ -97,9 +151,9 @@ namespace AmazonDFShip
                         "No token found in tbSites for site {0}.", siteId);
                     return false;
                 }
-                catch (SqlException ex)
+                catch (Exception ex)
                 {
-                    Logger.Error(ex, "SQL Exception in GetClientSecretForSite({0}).", siteId);
+                    Logger.Error(ex, "Exception in GetClientSecretForSite({0}).", siteId);
                     return false;
                 }
             }
@@ -111,6 +165,12 @@ namespace AmazonDFShip
 
         public int GetOrders(ref List<Order> lstOrders, List<int> exclusions = null)
         {
+            if (!IsConnected)
+            {
+                Logger.Error("GetOrders called before a successful login.");
+                return 0;
+            }
+
             const string Sql =
                 "SELECT TbAuctionInvoice.AuctionInvoice, TbAuctions.AuctionUserName, " +
                 "       TbAuctions.AuctionSite, TbAuctionInvoice.ShippingText, " +
@@ -157,9 +217,9 @@ namespace AmazonDFShip
                         }
                     }
                 }
-                catch (SqlException ex)
+                catch (Exception ex)
                 {
-                    Logger.Error(ex, "SQL Exception in GetOrders.");
+                    Logger.Error(ex, "Exception in GetOrders.");
                     return 0;
                 }
             }
@@ -174,6 +234,12 @@ namespace AmazonDFShip
         public bool UpdateTrackingForInvoice(int invoice, string tracking,
                                              string carrier = "AMZUPS")
         {
+            if (!IsConnected)
+            {
+                Logger.Error("UpdateTrackingForInvoice({0}) called before a successful login.", invoice);
+                return false;
+            }
+
             if (string.IsNullOrEmpty(tracking))
             {
                 Logger.Error(
@@ -209,9 +275,9 @@ namespace AmazonDFShip
                         "Update tracking returned 0 rows for invoice {0}.", invoice);
                     return false;
                 }
-                catch (SqlException ex)
+                catch (Exception ex)
                 {
-                    Logger.Error(ex, "SQL Exception in UpdateTrackingForInvoice({0}).", invoice);
+                    Logger.Error(ex, "Exception in UpdateTrackingForInvoice({0}).", invoice);
                     return false;
                 }
             }
@@ -229,6 +295,12 @@ namespace AmazonDFShip
 
         public bool UpdateShipMethod(int invoice, string newShipMethod = "USPS First Class Mail")
         {
+            if (!IsConnected)
+            {
+                Logger.Error("UpdateShipMethod({0}) called before a successful login.", invoice);
+                return false;
+            }
+
             const string Sql =
                 "UPDATE TbAuctionInvoice " +
                 "SET    ShippingText = @NEWSHIPMETHOD " +
@@ -257,9 +329,9 @@ namespace AmazonDFShip
                         rows, invoice);
                     return false;
                 }
-                catch (SqlException ex)
+                catch (Exception ex)
                 {
-                    Logger.Error(ex, "SQL Exception in UpdateShipMethod({0}).", invoice);
+                    Logger.Error(ex, "Exception in UpdateShipMethod({0}).", invoice);
                     return false;
                 }
             }
@@ -271,6 +343,12 @@ namespace AmazonDFShip
 
         public string GetLabelPath()
         {
+            if (!IsConnected)
+            {
+                Logger.Error("GetLabelPath called before a successful login.");
+                return string.Empty;
+            }
+
             const string Sql =
                 "SELECT configvalue FROM tbADSConfig WHERE configname = @CONFIGNAME";
 
@@ -291,9 +369,9 @@ namespace AmazonDFShip
                     Logger.Error("ShippingLabelDir2 not found in tbADSConfig.");
                     return string.Empty;
                 }
-                catch (SqlException ex)
+                catch (Exception ex)
                 {
-                    Logger.Error(ex, "SQL Exception in GetLabelPath.");
+                    Logger.Error(ex, "Exception in GetLabelPath.");
                     return string.Empty;
                 }
             }
@@ -305,6 +383,12 @@ namespace AmazonDFShip
 
         public void LogShipData(Order order)
         {
+            if (!IsConnected)
+            {
+                Logger.Error("LogShipData called before a successful login.");
+                return;
+            }
+
             using (var connection = new SqlConnection(m_strConnectionString))
             {
                 try
@@ -364,9 +448,9 @@ namespace AmazonDFShip
                     insert.Parameters.AddWithValue("@ZPLCONTENT", order.ShippingLabel.ZPL);
                     insert.ExecuteNonQuery();
                 }
-                catch (SqlException ex)
+                catch (Exception ex)
                 {
-                    Logger.Error(ex, "SQL Exception in LogShipData for invoice {0}.", order.Invoice);
+                    Logger.Error(ex, "Exception in LogShipData for invoice {0}.", order.Invoice);
                 }
             }
         }

@@ -20,6 +20,14 @@ namespace AmazonDFShip
         private const int MaxPayloadRetries = 3;
         private const int SmallPayloadBytes = 2000;
 
+        /// <summary>
+        /// Hard ceiling on how long a single order may sit waiting for Amazon to move
+        /// its transaction to Success. Without it the polling loops below spin forever
+        /// on a transaction that never leaves "Processing" (or on a response the parser
+        /// does not recognise), which strands an unattended run indefinitely.
+        /// </summary>
+        private const int TransactionTimeoutSeconds = 300;
+
         // -----------------------------------------------------------------------
         // Fields
         // -----------------------------------------------------------------------
@@ -45,6 +53,7 @@ namespace AmazonDFShip
         private bool m_bSavePayloads = true;
         private bool m_bSaveTransactions = true;
         private DateTime m_dtSubmissionRequest;
+        private DateTime m_dtPollingDeadline;
 
         // -----------------------------------------------------------------------
         // Properties
@@ -87,10 +96,15 @@ namespace AmazonDFShip
 
         public bool RunLabelOperations()
         {
+            m_dtPollingDeadline = DateTime.Now.AddSeconds(TransactionTimeoutSeconds);
+
             // Wait for the transaction to leave "Processing" state
             int trxStatus = GetTransactionStatus();
             while (trxStatus == 1)
             {
+                if (PollingExpired("waiting for transaction to leave Processing"))
+                    return false;
+
                 Thread.Sleep(1000);
                 trxStatus = GetTransactionStatus();
             }
@@ -159,6 +173,26 @@ namespace AmazonDFShip
                 "Unhandled label result {0} for order {1} / invoice {2}.",
                 labelResult, m_strOrder, m_iInvoice);
             return false;
+        }
+
+        /// <summary>
+        /// True once this order has spent longer than <see cref="TransactionTimeoutSeconds"/>
+        /// in a polling loop. Logs the reason so the stall is visible in the log file
+        /// rather than presenting as a run that simply never ends.
+        /// </summary>
+        private bool PollingExpired(string what)
+        {
+            if (DateTime.Now < m_dtPollingDeadline)
+                return false;
+
+            Logger.Error(
+                "Timed out after {0}s {1} for order {2} / invoice {3}. Giving up on this order.",
+                TransactionTimeoutSeconds, what, m_strOrder, m_iInvoice);
+
+            OrderManager.Instance.AddToLogTextBox(
+                $"Timed out waiting on Amazon for invoice {m_iInvoice} — skipping.");
+
+            return true;
         }
 
         // -----------------------------------------------------------------------
@@ -230,9 +264,21 @@ namespace AmazonDFShip
 
             dynamic obj = JsonConvert.DeserializeObject<dynamic>(response.Content);
 
+            bool stillProcessing = raw.ToLower().Contains("processing");
+
             // Save transaction payload to disk (skip while still processing)
-            if (m_bSaveTransactions && !raw.ToLower().Contains("processing"))
+            if (m_bSaveTransactions && !stillProcessing)
                 SaveTransactionFile(raw);
+
+            // Report "still processing" as 1 so the caller's wait loop actually runs.
+            // This method previously only ever returned 0 or 2, which made the wait
+            // loop in RunLabelOperations dead code and pushed all the waiting into
+            // GetShippingLabelRequest instead.
+            if (stillProcessing)
+            {
+                m_strTransactionStatus = "Processing";
+                return 1;
+            }
 
             foreach (var obj1 in obj)
             {
@@ -371,8 +417,18 @@ namespace AmazonDFShip
 
         private int GetShippingLabelRequest()
         {
+            if (m_dtPollingDeadline == default(DateTime))
+                m_dtPollingDeadline = DateTime.Now.AddSeconds(TransactionTimeoutSeconds);
+
             while (m_strTransactionStatus.ToLower() != "success")
             {
+                // GetTransactionStatus returns 0 without setting a status when the
+                // transactions endpoint replies resourceNotFound or with an unexpected
+                // shape. That used to leave this loop sleeping and re-polling forever.
+                if (PollingExpired($"waiting for transaction status 'Success' " +
+                                   $"(last seen: '{m_strTransactionStatus}')"))
+                    return 4;
+
                 if (m_strTransactionStatus.ToLower().Contains("failure"))
                 {
                     // Attempt a ship-method fallback for Amazon-method orders
@@ -591,10 +647,10 @@ namespace AmazonDFShip
         private void SaveTransactionFile(string content)
         {
             string path = NextAvailablePath(
-                $"trx\\{m_iInvoice}-{m_strOrder}-{{NUM}}.txt");
+                Path.Combine(Paths.TransactionDirName, $"{m_iInvoice}-{m_strOrder}-{{NUM}}.txt"));
             try
             {
-                File.WriteAllText(path, content);
+                File.WriteAllText(Paths.ResolveForWrite(path), content);
                 Logger.Info(
                     "Saved transaction file for order {0} / invoice {1} to {2}.",
                     m_strOrder, m_iInvoice, path);
@@ -610,11 +666,11 @@ namespace AmazonDFShip
             if (!m_bSavePayloads) return;
 
             string path = NextAvailablePath(
-                $"payloads\\{m_iInvoice}-{m_strOrder}-{{NUM}}.txt");
+                Path.Combine(Paths.PayloadDirName, $"{m_iInvoice}-{m_strOrder}-{{NUM}}.txt"));
             m_strPayloadFile = path;
             try
             {
-                File.WriteAllText(path,
+                File.WriteAllText(Paths.ResolveForWrite(path),
                     $"Transaction ID: {m_strTransactionId}{Environment.NewLine}{m_strPayload}");
                 Logger.Info(
                     "Saved payload for order {0} / invoice {1} to {2}.",
@@ -628,9 +684,11 @@ namespace AmazonDFShip
 
         private static string NextAvailablePath(string template)
         {
+            // Probe against the resolved absolute path so the "does it already exist"
+            // check is not silently answered from the caller's working directory.
             string path = template.Replace("{NUM}", "01");
             int n = 1;
-            while (File.Exists(path))
+            while (File.Exists(Paths.Resolve(path)))
                 path = template.Replace("{NUM}", (++n).ToString("00"));
             return path;
         }

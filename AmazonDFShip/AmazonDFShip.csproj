@@ -131,6 +131,7 @@
     <Compile Include="SellingPartnerAPIAA\LWAAuthorizationCredentials.cs" />
     <Compile Include="SellingPartnerAPIAA\LWAAuthorizationSigner.cs" />
     <Compile Include="SellingPartnerAPIAA\LWAClient.cs" />
+    <Compile Include="Paths.cs" />
     <Compile Include="SellingPartnerAPIAA\RateLimitConfiguration.cs" />
     <Compile Include="SellingPartnerAPIAA\RateLimitConfigurationOnRequests.cs" />
     <Compile Include="SellingPartnerAPIAA\ScopeConstants.cs" />
@@ -174,6 +175,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
+    <None Include="App.config.template">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <Analyzer Include="..\packages\AWSSDK.SecurityToken.3.7.1.148\analyzers\dotnet\cs\AWSSDK.SecurityToken.CodeAnalysis.dll" />

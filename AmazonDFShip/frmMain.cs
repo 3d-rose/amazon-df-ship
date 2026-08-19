@@ -21,7 +21,9 @@ namespace AmazonDFShip
         public frmMain()
         {
             InitializeComponent();
-            m_Logger.Info("Application version {0} starting...", m_strVersion);
+            Program.MainForm = this;
+            m_Logger.Info("Application version {0} starting (headless: {1})...",
+                m_strVersion, Program.IsHeadless);
         }
 
         // -----------------------------------------------------------------------
@@ -31,9 +33,16 @@ namespace AmazonDFShip
         private void frmMain_Load(object sender, EventArgs e)
         {
             if (Program.IsHeadless)
-                LoadHeadless();
+            {
+                // Load runs inside Application.Run before the message loop is pumping.
+                // Do the headless work on the loop instead, so BeginInvoke-based
+                // logging and shutdown behave normally.
+                BeginInvoke((MethodInvoker)LoadHeadless);
+            }
             else
+            {
                 LoadInteractive();
+            }
         }
 
         /// <summary>
@@ -47,13 +56,15 @@ namespace AmazonDFShip
             if (!login.LoginSuccessful())
             {
                 m_Logger.Fatal("Login failed. See previous logs.");
-                Application.Exit();
+                // Application.Exit() is a no-op this early (the message loop has not
+                // started yet), which left an empty window on screen. Queue a Close.
+                BeginInvoke((MethodInvoker)Close);
                 return;
             }
 
             if (!InitialiseTokens())
             {
-                Application.Exit();
+                BeginInvoke((MethodInvoker)Close);
                 return;
             }
 
@@ -75,39 +86,62 @@ namespace AmazonDFShip
             this.ShowInTaskbar = false;
             this.Visible = false;
 
-            // Authenticate against the database without showing a dialog.
-            // frmDatabaseLogin exposes a TryAutoLogin() that reads the same
-            // config keys and calls Database.Instance.Connect internally.
-            string dbUser = ConfigurationManager.AppSettings["DB.Username"] ?? string.Empty;
-            string dbPass = ConfigurationManager.AppSettings["DB.Password"] ?? string.Empty;
-
-            var login = new frmDatabaseLogin(this);
-            if (!login.TryAutoLogin(dbUser, dbPass))
+            try
             {
-                m_Logger.Fatal("Headless DB login failed — check DB.Username / DB.Password in App.config.");
-                Application.Exit();
-                return;
-            }
+                // Authenticate against the database without showing a dialog.
+                // Note: the values are passed through verbatim — no trimming — so
+                // passwords containing @ ; = ' " or spaces reach SqlConnectionStringBuilder
+                // exactly as written in App.config.
+                string dbUser = ConfigurationManager.AppSettings["DB.Username"] ?? string.Empty;
+                string dbPass = ConfigurationManager.AppSettings["DB.Password"] ?? string.Empty;
 
-            if (!InitialiseTokens())
+                var login = new frmDatabaseLogin(this);
+                if (!login.TryAutoLogin(dbUser, dbPass))
+                {
+                    Program.Report(
+                        "Headless DB login failed — check DB.Username / DB.Password in App.config. " +
+                        "If the password contains XML-special characters, remember that & must be " +
+                        "written as &amp; and < as &lt; inside the config file.",
+                        isError: true);
+                    Exit(Program.ExitLoginFailed);
+                    return;
+                }
+
+                if (!InitialiseTokens())
+                {
+                    Exit(Program.ExitTokenFailed);
+                    return;
+                }
+
+                OrderManager.Instance.RetrieveOrders();
+
+                if (OrderManager.Instance.Orders.Count == 0)
+                {
+                    Program.Report("Headless run: no orders found — nothing to do.");
+                    Exit(Program.ExitOk);
+                    return;
+                }
+
+                Program.Report(
+                    $"Headless run: generating labels for {OrderManager.Instance.Orders.Count} order(s).");
+
+                // ProcessAllOrders launches its own background task, so this returns
+                // immediately.  OnShippingLabelsFinished() ends the run.
+                OrderManager.Instance.ProcessAllOrders();
+            }
+            catch (Exception ex)
             {
-                Application.Exit();
-                return;
+                m_Logger.Fatal(ex, "Headless startup failed.");
+                Program.Report("Headless startup failed: " + ex.Message, isError: true);
+                Exit(Program.ExitUnhandled);
             }
+        }
 
-            OrderManager.Instance.RetrieveOrders();
-
-            if (OrderManager.Instance.Orders.Count == 0)
-            {
-                m_Logger.Info("Headless run: no orders found — exiting.");
-                Application.Exit();
-                return;
-            }
-
-            // ProcessAllOrders launches its own background thread, so this
-            // returns immediately.  OnShippingLabelsFinished() will call
-            // Application.Exit() when the run is complete.
-            OrderManager.Instance.ProcessAllOrders();
+        /// <summary>Sets the process exit code and shuts the headless run down.</summary>
+        private void Exit(int exitCode)
+        {
+            Environment.ExitCode = exitCode;
+            Program.ShutdownHeadless();
         }
 
         /// <summary>
@@ -130,42 +164,113 @@ namespace AmazonDFShip
         // Public form-bridge methods (called from OrderManager on background threads)
         // -----------------------------------------------------------------------
 
+        /// <summary>
+        /// Runs <paramref name="action"/> on the UI thread.
+        ///
+        /// Every bridge method below used to call Invoke() unconditionally. Invoke throws
+        /// InvalidOperationException when the control has no window handle, and it
+        /// deadlocks when the message loop is not pumping — both of which happen on the
+        /// --auto path, where the form is never shown. Guarding here keeps a headless run
+        /// from dying inside a status update.
+        /// </summary>
+        private void OnUi(MethodInvoker action)
+        {
+            if (IsDisposed || Disposing) return;
+
+            try
+            {
+                if (!IsHandleCreated)
+                {
+                    // No handle to marshal to. In headless mode the controls are never
+                    // seen anyway, so skipping the update is correct rather than fatal.
+                    if (!Program.IsHeadless)
+                        m_Logger.Warn("UI update skipped: window handle not yet created.");
+                    return;
+                }
+
+                if (InvokeRequired) Invoke(action);
+                else action();
+            }
+            catch (ObjectDisposedException) { /* form closed mid-update — nothing to do */ }
+            catch (InvalidOperationException ex)
+            {
+                m_Logger.Warn(ex, "UI update could not be marshalled to the UI thread.");
+            }
+        }
+
         public void AddToLogTextBox(string msg)
         {
             string toAppend = $"[{DateTime.Now:MM/dd/yyyy}|{DateTime.Now:HH:mm:ss}] {msg}{Environment.NewLine}";
-            Invoke((MethodInvoker)(() =>
+
+            // In headless mode the textbox is invisible, so the console is the only
+            // place a CLI caller can see progress.
+            if (Program.IsHeadless)
+            {
+                Program.Report(msg);
+                return;
+            }
+
+            OnUi(() =>
             {
                 txtLog.AppendText(toAppend);
                 txtLog.ScrollToCaret();
-            }));
+            });
         }
 
-        public void UpdateProcessLabel(string msg) =>
-            Invoke((MethodInvoker)(() => lblProcessing.Text = msg));
+        public void UpdateProcessLabel(string msg)
+        {
+            if (Program.IsHeadless)
+            {
+                m_Logger.Info(msg);
+                return;
+            }
+
+            OnUi(() => lblProcessing.Text = msg);
+        }
 
         public void UpdateSuccessFailure(int success, int failure)
         {
-            Invoke((MethodInvoker)(() => lblSuccess.Text = "Success: " + success));
-            Invoke((MethodInvoker)(() => lblFailures.Text = "Failure: " + failure));
+            if (Program.IsHeadless) return;
+
+            OnUi(() =>
+            {
+                lblSuccess.Text = "Success: " + success;
+                lblFailures.Text = "Failure: " + failure;
+            });
         }
 
         public void UpdateOrderCount(int orders3drox, int orders3drpb)
         {
-            Invoke((MethodInvoker)(() => lblOrderCount11.Text = "Orders for 3DROX: " + orders3drox));
-            Invoke((MethodInvoker)(() => lblOrderCount20.Text = "Orders for 3DRPB: " + orders3drpb));
+            if (Program.IsHeadless)
+            {
+                Program.Report($"Orders for 3DROX: {orders3drox} | Orders for 3DRPB: {orders3drpb}");
+                return;
+            }
+
+            OnUi(() =>
+            {
+                lblOrderCount11.Text = "Orders for 3DROX: " + orders3drox;
+                lblOrderCount20.Text = "Orders for 3DRPB: " + orders3drpb;
+            });
         }
 
         public void OnShippingLabelsFinished()
         {
-            // In headless mode there is nothing to update — just exit.
             if (Program.IsHeadless)
             {
-                Application.Exit();
+                // Called from the processing task, not the UI thread. Application.Exit()
+                // from a background thread is unreliable, so route through ShutdownHeadless.
+                Exit(OrderManager.Instance.FailureCount > 0
+                    ? Program.ExitLabelFailures
+                    : Program.ExitOk);
                 return;
             }
 
-            Invoke((MethodInvoker)(() => btnGenerateShippingLabels.Enabled = true));
-            Invoke((MethodInvoker)(() => btnRefresh.Enabled = true));
+            OnUi(() =>
+            {
+                btnGenerateShippingLabels.Enabled = true;
+                btnRefresh.Enabled = true;
+            });
 
             AddToLogTextBox("Automatically refreshing batch list...");
             RefreshBatchList();
@@ -177,28 +282,32 @@ namespace AmazonDFShip
 
         public void PopulateBatchList()
         {
+            if (Program.IsHeadless) return;
+
             if (OrderManager.Instance.Batches.Count == 0)
             {
-                Invoke((MethodInvoker)(() => btnGenerateShippingLabels.Enabled = false));
+                OnUi(() => btnGenerateShippingLabels.Enabled = false);
                 return;
             }
 
             foreach (string s in OrderManager.Instance.Batches)
             {
-                Invoke((MethodInvoker)(() =>
+                string batch = s; // capture per iteration
+                OnUi(() =>
                 {
-                    int idx = clbBatches.Items.Add(s);
+                    int idx = clbBatches.Items.Add(batch);
                     clbBatches.SetItemChecked(idx, true);
-                }));
+                });
             }
 
-            bool hasBatches = clbBatches.Items.Count > 0;
-            Invoke((MethodInvoker)(() => btnGenerateShippingLabels.Enabled = hasBatches));
+            OnUi(() => btnGenerateShippingLabels.Enabled = clbBatches.Items.Count > 0);
         }
 
         private void RefreshBatchList()
         {
-            Invoke((MethodInvoker)(() => clbBatches.Items.Clear()));
+            if (Program.IsHeadless) return;
+
+            OnUi(() => clbBatches.Items.Clear());
             OrderManager.Instance.RetrieveOrders();
             PopulateBatchList();
         }
@@ -270,7 +379,10 @@ namespace AmazonDFShip
 
         private void frmMain_FormClosed(object sender, FormClosedEventArgs e)
         {
-            Environment.Exit(0);
+            // Preserve whatever exit code the run produced instead of forcing 0,
+            // so a scheduler can tell a clean run from a failed one.
+            Program.FinaliseExit();
+            Environment.Exit(Environment.ExitCode);
         }
 
         // -----------------------------------------------------------------------

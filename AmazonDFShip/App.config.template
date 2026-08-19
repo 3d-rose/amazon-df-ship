@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Copy this file to App.config (which is gitignored) and fill in the values.
+  It must end up next to AmazonDFShip.exe as AmazonDFShip.exe.config.
+
+  XML ESCAPING - this is the usual cause of a working GUI login but a failing
+  --auto login. The following characters MUST be escaped inside a value:
+
+      &   ->  &amp;         <   ->  &lt;         >   ->  &gt;
+      "   ->  &quot;        '   ->  &apos;
+
+  Characters that need NO escaping and are safe verbatim:  @ ! # $ % ^ * ( ) ; = : /
+
+  A password of   P@ss&word<1   is written as   value="P@ss&amp;word&lt;1"
+  An unescaped & makes the whole config unparseable, and every
+  ConfigurationManager.AppSettings lookup then throws.
+
+  Do not add quotes around a value and do not trim leading/trailing spaces -
+  the value is passed to SQL Server exactly as written between the quote marks.
+-->
+<configuration>
+  <appSettings>
+
+    <!-- Database credentials used by the unattended (--auto) run. -->
+    <add key="DB.Username" value="" />
+    <add key="DB.Password" value="" />
+
+    <!-- Amazon LWA application. -->
+    <add key="Amazon.ClientId" value="" />
+
+    <!-- Per-seller refresh tokens. -->
+    <add key="3DROX.RefreshToken" value="" />
+    <add key="3DRPB.RefreshToken" value="" />
+
+    <!-- Optional: used only when the client secret cannot be read from tbSites. -->
+    <add key="3DROX.ClientSecretFallback" value="" />
+    <add key="3DRPB.ClientSecretFallback" value="" />
+
+    <!-- AWS SigV4 signing credentials. -->
+    <add key="AWS.AccessKeyId" value="" />
+    <add key="AWS.SecretKey" value="" />
+    <add key="AWS.Region" value="us-east-1" />
+
+    <!-- Optional: leave blank to disable Slack notifications. -->
+    <add key="Slack.WebhookUrl" value="" />
+
+  </appSettings>
+  <startup>
+    <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.7" />
+  </startup>
+</configuration>
