@@ -1,0 +1,167 @@
+## ---------------------------------------------
+## .gitignore for C# / .NET projects
+## ---------------------------------------------
+
+# Build results
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+[Ww][Ii][Nn]32/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+[Oo]ut/
+artifacts/
+publish/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sln.iml
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.userprefs
+*.DotSettings.user
+
+# Build / test output
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.VisualState.xml
+TestResult.xml
+nunit-*.xml
+coverage*.json
+coverage*.xml
+coverage*.info
+*.coverage
+*.coveragexml
+[Cc]overlet/
+BenchmarkDotNet.Artifacts/
+
+# NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+*.nuget.props
+*.nuget.targets
+.nuget/
+project.lock.json
+project.fragment.lock.json
+
+# MSBuild / compiler
+*.tlog
+*.log
+*.binlog
+*.ilk
+*.meta
+*.obj
+*.iobj
+*.pch
+*.pdb
+*.ipdb
+*.pgc
+*.pgd
+*.rsp
+*.sbr
+*.tlb
+*.tli
+*.tlh
+*.tmp
+*.tmp_proj
+*_wpftmp.csproj
+*.vspscc
+*.vssscc
+.builds
+*.pidb
+*.svclog
+*.scc
+
+# Publish / deployment
+*.[Pp]ublish.xml
+*.azurePubxml
+*.pubxml
+*.publishproj
+PublishScripts/
+*.[Cc]ache
+!?*.[Cc]ache/
+ClientBin/
+~$*
+*~
+*.dbmdl
+*.dbproj.schemaview
+*.jfm
+
+# Secrets & local config — keep these out of the repo
+appsettings.*.local.json
+appsettings.Development.json
+secrets.json
+*.pfx
+*.publishsettings
+launchSettings.json
+.env
+.env.*
+!.env.example
+
+# Entity Framework
+*.edmx.diagram
+*.mdf
+*.ldf
+*.ndf
+
+# ASP.NET / web
+node_modules/
+wwwroot/lib/
+[Ll]ibrary/
+*.min.js.map
+*.min.css.map
+Properties/launchSettings.json
+
+# ReSharper / JetBrains
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.resharper
+.JustCode
+_TeamCity*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+[Tt]humbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Misc
+*.bak
+*.orig
+*.rej
+*.swp
+*.gpState
+*.plg
+*.opt
+*.ncb
+*.aps
+*.sdf
+*.opensdf
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+
+App.config
