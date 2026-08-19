@@ -4,7 +4,7 @@
   It must end up next to AmazonDFShip.exe as AmazonDFShip.exe.config.
 
   XML ESCAPING - this is the usual cause of a working GUI login but a failing
-  --auto login. The following characters MUST be escaped inside a value:
+  unattended login. The following characters MUST be escaped inside a value:
 
       &   ->  &amp;         <   ->  &lt;         >   ->  &gt;
       "   ->  &quot;        '   ->  &apos;
@@ -21,7 +21,7 @@
 <configuration>
   <appSettings>
 
-    <!-- Database credentials used by the unattended (--auto) run. -->
+    <!-- Database credentials used by the unattended run. -->
     <add key="DB.Username" value="" />
     <add key="DB.Password" value="" />
 

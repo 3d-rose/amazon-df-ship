@@ -36,17 +36,42 @@ jobs:
       # App.config is gitignored, but MSBuild still needs it to exist — the
       # <None Include="App.config" /> item drives the copy to
       # AmazonDFShip.exe.config, and a missing file fails the build with MSB3030.
-      # We stage the blank template so CI compiles without any credentials.
-      # Fill the values in on the machine that actually runs the exe.
-      - name: Stage a blank App.config
+      #
+      # A minimal stub is written here rather than copying App.config.template:
+      # MSBuild parses this file (MSB3249) and the template is documentation-heavy,
+      # so its prose is one stray "--" or malformed entity away from breaking CI.
+      # The real config is deployed separately onto the production machine.
+      - name: Stage a stub App.config
         shell: pwsh
         run: |
           $target = 'AmazonDFShip\App.config'
+
           if (Test-Path $target) {
-            Write-Host "App.config already present — leaving it alone."
+            Write-Host "App.config already present - leaving it alone."
           } else {
-            Copy-Item 'AmazonDFShip\App.config.template' $target
-            Write-Host "Staged blank App.config from template."
+            $stub = @'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <appSettings>
+              <add key="CI.Placeholder" value="true" />
+            </appSettings>
+            <startup>
+              <supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.7" />
+            </startup>
+          </configuration>
+          '@
+            Set-Content -Path $target -Value $stub -Encoding UTF8
+            Write-Host "Wrote stub App.config."
+          }
+
+          # Fail loudly here rather than 40 lines into an MSBuild error dump.
+          try {
+            [xml](Get-Content $target -Raw) | Out-Null
+            Write-Host "App.config parses as valid XML."
+          } catch {
+            Write-Error "App.config is not valid XML: $_"
+            Get-Content $target
+            exit 1
           }
 
       - name: Restore NuGet packages
